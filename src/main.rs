@@ -5,24 +5,19 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// This many new normal keys inside one time window counts as a burst.
-const LIMIT: usize = 3;
+// This many new key presses (modifiers included) inside one time window counts as a burst.
+// Real typing almost never has this many keys go down within a few milliseconds.
+const LIMIT: usize = 4;
 // Every key event is held back this long so a burst can be spotted before it is forwarded.
-const WINDOW: Duration = Duration::from_millis(10);
+// A burst can arrive in chunks about 10 ms apart, so this needs to be well above 10 ms.
+const WINDOW: Duration = Duration::from_millis(30);
 
-const MODS: [Key; 8] = [
-    Key::KEY_LEFTCTRL,
-    Key::KEY_RIGHTCTRL,
-    Key::KEY_LEFTSHIFT,
-    Key::KEY_RIGHTSHIFT,
-    Key::KEY_LEFTALT,
-    Key::KEY_RIGHTALT,
-    Key::KEY_LEFTMETA,
-    Key::KEY_RIGHTMETA,
-];
+// The keys that start the bursts on this keyboard. When a burst happens and exactly one
+// of these is inside it, that key is treated as the real press and kept.
+const TRIGGERS: [Key; 4] = [Key::KEY_G, Key::KEY_T, Key::KEY_V, Key::KEY_SPACE];
 
-fn is_mod(code: u16) -> bool {
-    MODS.iter().any(|k| k.code() == code)
+fn is_trigger(code: u16) -> bool {
+    TRIGGERS.iter().any(|k| k.code() == code)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,6 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keys whose press was dropped, so their release and repeats are dropped too.
     let mut dropped: HashSet<u16> = HashSet::new();
     let mut burst_until = Instant::now();
+    // True once the current burst has already settled on a real trigger key.
+    let mut burst_has_trigger = false;
 
     loop {
         let timeout = match pending.front() {
@@ -90,29 +87,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match rx.recv_timeout(timeout) {
             Ok((ev, t)) => {
                 let code = ev.code();
-                let normal_down = ev.value() == 1 && !is_mod(code);
+                let is_down = ev.value() == 1;
 
-                if normal_down && t < burst_until {
+                if is_down && t < burst_until {
                     // Late part of a burst that was already detected.
-                    dropped.insert(code);
+                    if is_trigger(code) && !burst_has_trigger {
+                        burst_has_trigger = true;
+                        pending.push_back((ev, t));
+                    } else {
+                        dropped.insert(code);
+                    }
                 } else {
                     pending.push_back((ev, t));
 
-                    if normal_down {
+                    if is_down {
                         let recent: Vec<u16> = pending
                             .iter()
-                            .filter(|(e, pt)| {
-                                e.value() == 1
-                                    && !is_mod(e.code())
-                                    && t.duration_since(*pt) <= WINDOW
-                            })
+                            .filter(|(e, pt)| e.value() == 1 && t.duration_since(*pt) <= WINDOW)
                             .map(|(e, _)| e.code())
                             .collect();
 
                         if recent.len() >= LIMIT {
+                            let triggers: Vec<u16> =
+                                recent.iter().copied().filter(|c| is_trigger(*c)).collect();
+                            let keep = if triggers.len() == 1 {
+                                Some(triggers[0])
+                            } else {
+                                None
+                            };
+
+                            let names: Vec<Key> = recent.iter().map(|c| Key::new(*c)).collect();
+                            eprintln!("burst: {:?} keeping {:?}", names, keep.map(Key::new));
+
                             for c in recent {
-                                dropped.insert(c);
+                                if Some(c) != keep {
+                                    dropped.insert(c);
+                                }
                             }
+                            burst_has_trigger = !triggers.is_empty();
                             burst_until = t + WINDOW;
                         }
                     }
