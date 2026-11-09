@@ -10,6 +10,10 @@ const LIMIT: usize = 3;
 // Every key event is held back this long so a burst can be spotted before it is forwarded.
 const WINDOW: Duration = Duration::from_millis(10);
 
+// The keys that start the bursts on this keyboard. When a burst happens and exactly one
+// of these is inside it, that key is treated as the real press and kept.
+const TRIGGERS: [Key; 3] = [Key::KEY_G, Key::KEY_T, Key::KEY_V];
+
 const MODS: [Key; 8] = [
     Key::KEY_LEFTCTRL,
     Key::KEY_RIGHTCTRL,
@@ -23,6 +27,10 @@ const MODS: [Key; 8] = [
 
 fn is_mod(code: u16) -> bool {
     MODS.iter().any(|k| k.code() == code)
+}
+
+fn is_trigger(code: u16) -> bool {
+    TRIGGERS.iter().any(|k| k.code() == code)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,6 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keys whose press was dropped, so their release and repeats are dropped too.
     let mut dropped: HashSet<u16> = HashSet::new();
     let mut burst_until = Instant::now();
+    // True once the current burst has already settled on a real trigger key.
+    let mut burst_has_trigger = false;
 
     loop {
         let timeout = match pending.front() {
@@ -94,7 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if normal_down && t < burst_until {
                     // Late part of a burst that was already detected.
-                    dropped.insert(code);
+                    if is_trigger(code) && !burst_has_trigger {
+                        burst_has_trigger = true;
+                        pending.push_back((ev, t));
+                    } else {
+                        dropped.insert(code);
+                    }
                 } else {
                     pending.push_back((ev, t));
 
@@ -110,9 +125,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect();
 
                         if recent.len() >= LIMIT {
+                            let triggers: Vec<u16> =
+                                recent.iter().copied().filter(|c| is_trigger(*c)).collect();
+                            let keep = if triggers.len() == 1 {
+                                Some(triggers[0])
+                            } else {
+                                None
+                            };
+
+                            let names: Vec<Key> = recent.iter().map(|c| Key::new(*c)).collect();
+                            eprintln!("burst: {:?} keeping {:?}", names, keep.map(Key::new));
+
                             for c in recent {
-                                dropped.insert(c);
+                                if Some(c) != keep {
+                                    dropped.insert(c);
+                                }
                             }
+                            burst_has_trigger = !triggers.is_empty();
                             burst_until = t + WINDOW;
                         }
                     }
